@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert result.returncode!=0 and f.read_bytes()==before
 print('PASS лимиты nginx: повышение, сохранение больших, повтор, отказ без events')
 
-detector=re.search(r"python3 -c '\n(.*?)\n' \"\$NODE_PORT\"",common,re.S)[1]
+detector=re.search(r"python3 -c '\n(.*?)\n' \"\$NODE_PORT\"",common.split('rn_discover_public_inbounds() {',1)[1],re.S)[1]
 sample='''tcp LISTEN 0 4096 0.0.0.0:24443 0.0.0.0:* users:(("rw-core",pid=100,fd=1))
 tcp LISTEN 0 4096 127.0.0.1:7443 0.0.0.0:* users:(("rw-core",pid=100,fd=2))
 tcp LISTEN 0 4096 [::]:61000 [::]:* users:(("rw-core",pid=100,fd=3))
@@ -72,5 +72,5 @@ tcp LISTEN 0 4096 0.0.0.0:55203 0.0.0.0:* users:(("rw-core",pid=101,fd=3)) uid:6
 udp UNCONN 0 0 [::]:443 [::]:* users:(("xray",pid=100,fd=4))
 '''
 r=subprocess.run([os.sys.executable,'-X','utf8','-c',detector,'9744'],input=sample,capture_output=True,text=True)
-assert r.returncode==0 and r.stdout=='tcp 24443\nudp 443\n',(r.stdout,r.stderr)
-print('PASS определение 24443/TCP и 443/UDP без локального XHTTP/API')
+assert r.returncode==0 and r.stdout=='tcp 24443\n',(r.stdout,r.stderr)
+print('PASS определение 24443/TCP без локального XHTTP/API и неподтверждённых UDP')

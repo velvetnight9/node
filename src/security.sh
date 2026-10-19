@@ -45,24 +45,56 @@ rn_node_info() {
     local detected
     detected="$(docker inspect "$NODE_CONTAINER" | python3 -c 'import sys,json; d=json.load(sys.stdin)[0]; print(next((v.split("=",1)[1] for v in d["Config"].get("Env",[]) if v.startswith("NODE_PORT=")),""))')"
     if [[ -n "$detected" ]]; then
-      if [[ -n "${NODE_PORT:-}" && "$NODE_PORT" != "$detected" ]]; then
-        rn_die "NODE_PORT=$NODE_PORT не совпадает с работающей нодой ($detected). Сначала исправьте настройку в панели/compose."; return 1
-      fi
-      NODE_PORT="$detected"
+      RN_RUNNING_NODE_PORT="$detected"
     fi
   fi
-  if [[ -z "${NODE_PORT:-}" ]]; then
+  if [[ -z "${RN_RUNNING_NODE_PORT:-}" ]]; then
     local control_ports=()
     mapfile -t control_ports < <(ss -H -ltnp | awk '/"rw-node"/ {n=split($4,a,":");print a[n]}' | sort -nu)
-    if ((${#control_ports[@]}==1)); then NODE_PORT="${control_ports[0]}"; fi
+    if ((${#control_ports[@]}==1)); then RN_RUNNING_NODE_PORT="${control_ports[0]}"; fi
   fi
 }
 rn_ssh_ports() {
   {
     [[ -z "${SSH_CONNECTION:-}" ]] || printf '%s\n' "${SSH_CONNECTION##* }"
-    ss -H -ltnp | awk '/sshd|systemd/ {n=split($4,a,":"); if ($0 ~ /sshd/ || a[n]==22) print a[n]}'
-    sshd -T 2>/dev/null | awk '$1=="port" {print $2}'
+    ss -H -ltnp | python3 -c '
+import ipaddress,re,sys
+for line in sys.stdin:
+ fields=line.split()
+ if len(fields)<5 or not re.search(r"\(\"sshd(?:-session)?\"",line):continue
+ host,port=fields[3].rsplit(":",1);host=host.strip("[]").split("%",1)[0]
+ try:
+  if ipaddress.ip_address(host).is_loopback:continue
+ except ValueError:
+  if host!="*":continue
+ if port.isdigit():print(port)
+'
+    if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+      systemctl show ssh.socket -p Listen --value | sed -nE 's/.*:([0-9]+) \(Stream\).*/\1/p'
+    fi
   } | awk '/^[0-9]+$/ && $1>0 && $1<=65535' | sort -nu | paste -sd, -
+}
+rn_ssh_context() {
+  [[ -z "${SSH_CONNECTION:-}" ]] || return 0
+  # sudo обычно удаляет SSH_CONNECTION. Читаем только её у предков процесса,
+  # а не копируем окружение целиком и не выводим его в журнал.
+  SSH_CONNECTION="$(python3 - "$$" <<'PY'
+from pathlib import Path
+import sys,ipaddress
+pid=int(sys.argv[1])
+for _ in range(64):
+ if pid<=1:break
+ try:
+  for value in Path('/proc/'+str(pid)+'/environ').read_bytes().split(b'\0'):
+   if value.startswith(b'SSH_CONNECTION='):
+    text=value.split(b'=',1)[1].decode();parts=text.split()
+    if len(parts)==4 and all(x.isdigit() and 0<int(x)<65536 for x in (parts[1],parts[3])):
+     ipaddress.ip_address(parts[0]);ipaddress.ip_address(parts[2]);print(text);raise SystemExit
+  pid=int(Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()[1])
+ except (FileNotFoundError,PermissionError,ProcessLookupError):break
+PY
+  )"
+  export SSH_CONNECTION
 }
 rn_prepare() {
   [[ "$EUID" == 0 ]] || { rn_die 'Запустите от root'; return 1; }
@@ -73,20 +105,23 @@ rn_prepare() {
   rn_ask PANEL_IPS 'IP панели (несколько IPv4/IPv6 — через пробел)'
   PANEL_IPS="$(rn_ips "$PANEL_IPS")"
   rn_node_info
-  rn_ask NODE_PORT 'Порт управления нодой из панели' 2222
+  rn_ask NODE_PORT "Порт управления нодой из панели (сейчас ${RN_RUNNING_NODE_PORT:-не найден})" 9744
   rn_port "$NODE_PORT" || { rn_die 'Некорректный NODE_PORT'; return 1; }
-  RN_SSH_PORTS="$(rn_ssh_ports)"
-  [[ -n "$RN_SSH_PORTS" ]] || { rn_die 'Не удалось определить SSH-порт'; return 1; }
+  rn_ssh_context
+  RN_OLD_SSH_PORTS="$(rn_ssh_ports)"
+  rn_ask SSH_PORT "SSH-порт для входа на сервер (сейчас ${RN_OLD_SSH_PORTS:-не найден})" 48522
+  rn_port "$SSH_PORT" || { rn_die 'Некорректный SSH_PORT'; return 1; }
+  RN_SSH_PORTS="$(printf '%s\n%s\n' "${RN_OLD_SSH_PORTS//,/$'\n'}" "$SSH_PORT" | awk 'NF' | sort -nu | paste -sd, -)"
   case ",$RN_SSH_PORTS,80,443," in *",$NODE_PORT,"*) rn_die 'Порт управления совпадает с SSH/HTTP/HTTPS'; return 1;; esac
   RN_ADMIN_IP=""
   if [[ -n "${SSH_CONNECTION:-}" ]]; then RN_ADMIN_IP="$(rn_ips "${SSH_CONNECTION%% *}")"; fi
   RN_BACKUP="$(mktemp -d /root/remnanode-security-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX)"
   chmod 700 "$RN_BACKUP"
-  rn_info "SSH-порты сохраняются: $RN_SSH_PORTS; управление: TCP/$NODE_PORT только с $PANEL_IPS"
+  rn_info "SSH: TCP/$SSH_PORT; управление: TCP/$NODE_PORT только с $PANEL_IPS"
 }
 rn_backup() {
   local item
-  for item in etc/ufw etc/default/ufw etc/fail2ban etc/ssh usr/local/sbin/remnanode-control-firewall etc/remnanode-security etc/systemd/system/remnanode-control-firewall.service; do
+  for item in etc/ufw etc/default/ufw etc/fail2ban etc/ssh etc/systemd/system/ssh.socket.d etc/systemd/system/ssh.service.d usr/local/sbin/remnanode-control-firewall etc/remnanode-security etc/systemd/system/remnanode-control-firewall.service; do
     [[ ! -e "/$item" ]] || { mkdir -p "$RN_BACKUP/$(dirname "$item")"; cp -a "/$item" "$RN_BACKUP/$item"; }
   done
   LC_ALL=C ufw status >"$RN_BACKUP/ufw-status"
@@ -146,7 +181,7 @@ rn_firewall() (
   ufw allow 443/tcp
   if [[ "${RN_ROLE:-standard}" == standard ]]; then
     ufw allow 443/udp
-  elif [[ -n "$(ss -H -lun 'sport = :443')" ]]; then
+  elif rn_discover_public_inbounds | grep -Fx 'udp 443' >/dev/null; then
     rn_info 'Обнаружен UDP/443: сохраняю работающий транспорт'
     ufw allow 443/udp
   else
@@ -202,9 +237,49 @@ UNIT
 rn_discover_public_inbounds() {
   { ss -H -ltnpe | sed 's/^/tcp /'; ss -H -lunpe | sed 's/^/udp /'; } |
     python3 -c '
-import ipaddress,re,sys
+import ipaddress,re,sys,json,socket,http.client
+from pathlib import Path
 excluded={int(sys.argv[1]),61000,61001}
 found=set()
+udp_cache={}
+def configured_udp(pid):
+    if pid in udp_cache:return udp_cache[pid]
+    udp_cache[pid]=set()
+    try:
+        args=Path("/proc/"+str(pid)+"/cmdline").read_bytes().decode().split("\0")
+        flag=next(x for x in ("-config","--config","-c") if x in args)
+        filename=args[args.index(flag)+1]
+        if filename.startswith("@"):
+            address,target=filename.split(":",1)
+            connection=socket.socket(socket.AF_UNIX);connection.settimeout(2)
+            try:
+                connection.connect("\0"+address[1:])
+                connection.sendall(("GET "+target+" HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").encode())
+                response=http.client.HTTPResponse(connection);response.begin()
+                if response.status!=200:return udp_cache[pid]
+                conf=json.loads(response.read(8*1024*1024))
+            finally:connection.close()
+        else:
+            path=Path("/proc/"+str(pid)+"/root")/filename.lstrip("/")
+            conf=json.loads(path.read_text())
+        for inbound in conf.get("inbounds",[]):
+            transport=inbound.get("streamSettings",{}).get("network","")
+            protocol=inbound.get("protocol","")
+            is_udp=transport in ("hysteria","quic","kcp") or protocol=="hysteria"
+            is_udp=is_udp or (protocol=="dokodemo-door" and "udp" in inbound.get("settings",{}).get("network","").split(","))
+            if not is_udp:continue
+            listen=inbound.get("listen") or "0.0.0.0"
+            if listen not in ("*","0.0.0.0","::"):
+                try:
+                    if not ipaddress.ip_address(listen).is_global:continue
+                except ValueError:continue
+            for part in str(inbound.get("port","")).split(","):
+                match=re.fullmatch(r"(\d+)(?:-(\d+))?",part.strip())
+                if not match:continue
+                a=int(match[1]);b=int(match[2] or match[1])
+                if 0<a<=b<65536:udp_cache[pid].update(range(a,b+1))
+    except (OSError,ValueError,KeyError,IndexError,StopIteration,http.client.HTTPException):pass
+    return udp_cache[pid]
 for line in sys.stdin:
     fields=line.split()
     if len(fields)<6 or not re.search(r"\(\"(?:rw-core|xray)\"",line):continue
@@ -217,6 +292,9 @@ for line in sys.stdin:
     except ValueError:continue
     host=host.strip("[]").split("%",1)[0]
     if port in excluded:continue
+    if fields[0]=="udp":
+        pids=[int(x) for x in re.findall(r"\bpid=(\d+)",line)]
+        if not any(port in configured_udp(pid) for pid in pids):continue
     if host not in ("*","0.0.0.0","::"):
         try:
             address=ipaddress.ip_address(host)
@@ -350,51 +428,121 @@ PY
   )
   return 1
 }
+rn_ssh_key_prepare() {
+  [[ "${RN_SSH_KEY_READY:-0}" == 0 ]] || return 0
+  if rn_ssh_verified_key; then RN_SSH_KEY_READY=1; return 0; fi
+  rn_ask SSH_PUBLIC_KEY 'Публичный SSH-ключ для root (ssh-ed25519/ssh-rsa/ecdsa, не приватный ключ)' || return 1
+  [[ "$SSH_PUBLIC_KEY" =~ ^(ssh-|ecdsa-|sk-) && "$SSH_PUBLIC_KEY" != *$'\n'* ]] || { rn_die 'Нужен один публичный SSH-ключ'; return 1; }
+  printf '%s\n' "$SSH_PUBLIC_KEY" | ssh-keygen -lf /dev/stdin >/dev/null || { rn_die 'Некорректный публичный SSH-ключ'; return 1; }
+  install -d -m 700 /root/.ssh
+  [[ ! -e /root/.ssh/authorized_keys ]] || cp -a /root/.ssh/authorized_keys "$RN_BACKUP/authorized_keys-before"
+  touch /root/.ssh/authorized_keys
+  grep -Fx "$SSH_PUBLIC_KEY" /root/.ssh/authorized_keys >/dev/null || printf '\n%s\n' "$SSH_PUBLIC_KEY" >>/root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  RN_SSH_KEY_READY=1
+}
+rn_restore_ssh() {
+  local item
+  for item in etc/ssh/sshd_config etc/ssh/remnanode-access.conf etc/ssh/sshd_config.d/00-remnanode-auth.conf etc/systemd/system/ssh.socket.d/zz-remnanode-listen.conf etc/systemd/system/ssh.service.d/zz-remnanode-session.conf; do
+    if [[ -f "$RN_BACKUP/$item" ]]; then cp -a "$RN_BACKUP/$item" "/$item"; else rm -f "/$item"; fi
+  done
+  systemctl daemon-reload
+  if [[ "${RN_SSH_SOCKET_ACTIVE:-0}" == 1 ]]; then systemctl restart ssh.socket ssh.service; else systemctl reload ssh.service; fi
+}
 rn_ssh_harden() {
-  if ! rn_ssh_verified_key; then
-    rn_info 'Текущий вход по ключу не подтверждён: парольный вход и SSH-порты сохраняются.'
-    return 0
-  fi
-  local dropin=/etc/ssh/sshd_config.d/00-remnanode-auth.conf
+  # Подготовка ключа обязательна до изменений firewall: тихого пропуска больше нет.
+  rn_ssh_key_prepare
+  # Вне *.conf drop-in: повторный Include иначе складывает директивы Port.
+  local dropin=/etc/ssh/remnanode-access.conf
+  RN_SSH_SOCKET_ACTIVE=0
+  systemctl is-active --quiet ssh.socket && RN_SSH_SOCKET_ACTIVE=1
   install -d /etc/ssh/sshd_config.d
-  cat >"$dropin" <<'EOF'
-# Пароли отключаются только после подтверждённого текущего входа по ключу.
+  cat >"$dropin" <<EOF
+# Вход только по ключу; SSH и NODE_PORT являются разными портами.
+Port $SSH_PORT
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
+AuthenticationMethods publickey
 PermitRootLogin prohibit-password
 PermitEmptyPasswords no
 EOF
   if [[ "$(head -n 1 /etc/ssh/sshd_config)" != "Include $dropin" ]]; then
     sed -i "1i Include $dropin" /etc/ssh/sshd_config
   fi
+  sed -i '\#^Include /etc/ssh/sshd_config.d/00-remnanode-auth.conf$#d' /etc/ssh/sshd_config
+  rm -f /etc/ssh/sshd_config.d/00-remnanode-auth.conf
   if ! sshd -t; then
-    cp -a "$RN_BACKUP/etc/ssh/sshd_config" /etc/ssh/sshd_config
-    if [[ -f "$RN_BACKUP/$dropin" ]]; then cp -a "$RN_BACKUP/$dropin" "$dropin"; else rm -f "$dropin"; fi
+    rn_restore_ssh
     rn_die 'sshd не принял настройки; конфиг восстановлен'; return 1
   fi
-  if systemctl is-active --quiet ssh.service; then
-    if ! systemctl reload ssh.service; then
-      cp -a "$RN_BACKUP/etc/ssh/sshd_config" /etc/ssh/sshd_config
-      if [[ -f "$RN_BACKUP/$dropin" ]]; then cp -a "$RN_BACKUP/$dropin" "$dropin"; else rm -f "$dropin"; fi
-      systemctl reload ssh.service || true
-      rn_die 'Не удалось применить SSH-конфиг; восстановлена копия'; return 1
-    fi
+  # Старые глобальные Port складываются с Include. Убираем только глобальные
+  # Port, Match-блоки остаются на месте; наш единственный Port — в drop-in.
+  python3 - /etc/ssh/sshd_config <<'PY'
+from pathlib import Path
+import re,sys
+p=Path(sys.argv[1]);lines=p.read_text().splitlines(True);inside=False;result=[]
+for line in lines:
+ if re.match(r'\s*Match\s',line,re.I):inside=True
+ if not inside and re.match(r'\s*Port\s',line,re.I):continue
+ result.append(line)
+p.write_text(''.join(result))
+PY
+  # Проверяем эффективную политику, включая Match для текущего администратора.
+  local effective
+  effective="$(sshd -T -C "user=${SUDO_USER:-root},host=localhost,addr=${RN_ADMIN_IP:-127.0.0.1}")"
+  if ! grep -qx 'authenticationmethods publickey' <<<"$effective" || ! grep -qx 'passwordauthentication no' <<<"$effective" || ! grep -qx 'kbdinteractiveauthentication no' <<<"$effective"; then
+    rn_restore_ssh; rn_die 'Match переопределяет key-only политику; конфиг восстановлен'; return 1
   fi
-  rn_info 'Текущий вход по ключу подтверждён; парольная аутентификация отключена, порт сохранён.'
+  if [[ "$RN_SSH_SOCKET_ACTIVE" == 1 ]]; then
+    install -d /etc/systemd/system/ssh.socket.d /etc/systemd/system/ssh.service.d
+    {
+      printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\n' "$SSH_PORT"
+      [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" == 1 ]] || printf 'ListenStream=[::]:%s\nBindIPv6Only=ipv6-only\n' "$SSH_PORT"
+    } >/etc/systemd/system/ssh.socket.d/zz-remnanode-listen.conf
+    printf '[Service]\nKillMode=process\n' >/etc/systemd/system/ssh.service.d/zz-remnanode-session.conf
+    systemctl daemon-reload
+    if ! systemctl restart ssh.socket ssh.service; then rn_restore_ssh; rn_die 'SSH socket не применён; настройки восстановлены'; return 1; fi
+  elif systemctl is-active --quiet ssh.service; then
+    if ! systemctl reload ssh.service; then rn_restore_ssh; rn_die 'SSH reload не удался; настройки восстановлены'; return 1; fi
+  else
+    rn_restore_ssh; rn_die 'Не найдена активная ssh.service'; return 1
+  fi
+  if ! python3 - "$SSH_PORT" <<'PY'
+import socket,sys,time
+for _ in range(30):
+ try:
+  with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=1) as s:
+   s.settimeout(1)
+   if s.recv(120).startswith(b'SSH-'):raise SystemExit(0)
+ except OSError:time.sleep(.2)
+raise SystemExit(1)
+PY
+  then rn_restore_ssh; rn_die 'Новый SSH-порт не отвечает; восстановлен предыдущий'; return 1; fi
+  local port
+  for port in ${RN_OLD_SSH_PORTS//,/ }; do
+    [[ "$port" == "$SSH_PORT" ]] || ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
+  done
+  # Старый скрипт ошибочно открывал локальные X11 forwarding 6010, 6011, ...
+  for port in $(ss -H -ltnp | awk '/sshd/ && $4 ~ /^(127\.|\[::1\])/ {n=split($4,a,":");if(a[n]>=6000 && a[n]<=6099)print a[n]}' | sort -nu); do
+    [[ "$port" == "$SSH_PORT" ]] || ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
+  done
+  RN_SSH_PORTS="$SSH_PORT"
+  rn_info "SSH TCP/$SSH_PORT: только публичный ключ; пароль и keyboard-interactive отключены."
 }
 rn_security() {
   rn_prepare
   export DEBIAN_FRONTEND=noninteractive
   rn_ensure_packages ufw nftables fail2ban python3-systemd iproute2 util-linux
   rn_backup
+  rn_ssh_key_prepare
   rn_firewall
+  rn_ssh_harden
   rn_install_inbound_sync
   rn_fail2ban
-  rn_ssh_harden
   printf '%s\n' "$PANEL_IPS" >"$RN_STATE_DIR/panel-ips"
   chmod 600 "$RN_STATE_DIR/panel-ips"
-  rn_info "Безопасность проверена. SSH-порты сохранены. Копия: $RN_BACKUP"
+  rn_info "Безопасность проверена. SSH TCP/$SSH_PORT — только ключ. Копия: $RN_BACKUP"
 }
 rn_existing_repair() {
   rn_security
@@ -402,9 +550,65 @@ rn_existing_repair() {
     local mode
     mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$NODE_CONTAINER")"
     if [[ "$(docker inspect -f '{{.State.Running}}' "$NODE_CONTAINER")" != true ]]; then docker start "$NODE_CONTAINER"; fi
+    rn_change_node_port
     rn_info "Сеть ноды: $mode"
     if [[ "$mode" != host ]]; then rn_info 'Bridge-сеть сохранена; control guard действует и на FORWARD. Другие опубликованные порты проверьте отдельно.'; fi
     docker inspect -f 'Нода: {{.State.Status}}; перезапуски: {{.RestartCount}}; журнал: {{.HostConfig.LogConfig.Type}}' "$NODE_CONTAINER"
   fi
-  rn_info 'Домены, compose, SECRET_KEY и профили панели не перезаписывались.'
+  rn_info 'Домены, SECRET_KEY и профили панели сохранены; NODE_PORT изменяется только по выбранному значению.'
+}
+rn_change_node_port() {
+  [[ -n "${RN_RUNNING_NODE_PORT:-}" && "$RN_RUNNING_NODE_PORT" != "$NODE_PORT" ]] || return 0
+  local directory="${NODE_DIR:-/opt/remnanode}" file service
+  [[ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$NODE_CONTAINER")" == host ]] || { rn_die 'Смена NODE_PORT для bridge требует отдельной проверки published ports'; return 1; }
+  file="$directory/docker-compose.yml"
+  [[ -f "$file" ]] || file="$directory/compose.yaml"
+  [[ -f "$file" ]] || { rn_die 'Не найден compose: порт контейнера не изменён'; return 1; }
+  local image_id local_image
+  image_id="$(docker inspect -f '{{.Image}}' "$NODE_CONTAINER")"
+  local_image="$(docker image inspect -f '{{.Id}}' "$(docker inspect -f '{{.Config.Image}}' "$NODE_CONTAINER")")"
+  [[ "$image_id" == "$local_image" ]] || { rn_die 'Локальный тег образа изменился: не пересоздаю ноду с другим ядром'; return 1; }
+  rn_ensure_packages python3-yaml
+  cp -a "$file" "$RN_BACKUP/node-compose-before.yml"
+  if ! service="$(python3 - "$file" "$NODE_CONTAINER" "$NODE_PORT" <<'PY'
+from pathlib import Path
+import json,os,stat,sys,tempfile,yaml
+p=Path(sys.argv[1]);conf=yaml.safe_load(p.read_text());services=conf.get('services',{})
+names=[name for name,value in services.items() if value.get('container_name')==sys.argv[2]]
+if not names:names=[name for name,value in services.items() if str(value.get('image','')).startswith('remnawave/node')]
+if len(names)!=1:raise SystemExit('Неоднозначный сервис ноды: compose сохранён')
+service=services[names[0]];env=service.setdefault('environment',{})
+if isinstance(env,dict):env['NODE_PORT']=sys.argv[3]
+elif isinstance(env,list):service['environment']=[v for v in env if not str(v).startswith('NODE_PORT=') and v!='NODE_PORT']+['NODE_PORT='+sys.argv[3]]
+else:raise SystemExit('Нестандартный environment: compose сохранён')
+content=json.dumps(conf,ensure_ascii=False,indent=2)+'\n'
+fd,tmp=tempfile.mkstemp(dir=p.parent)
+try:
+ os.fchmod(fd,stat.S_IMODE(p.stat().st_mode))
+ with os.fdopen(fd,'w') as f:f.write(content)
+ os.replace(tmp,p)
+finally:
+ if os.path.exists(tmp):os.unlink(tmp)
+print(names[0])
+PY
+  )"; then rn_die 'Не удалось безопасно изменить NODE_PORT'; return 1; fi
+  if ! (cd "$directory"; docker compose config --quiet && docker compose up -d --no-deps --pull never "$service"); then
+    cp -a "$RN_BACKUP/node-compose-before.yml" "$file"
+    (cd "$directory"; docker compose up -d --no-deps --pull never "$service") || true
+    rn_restore_firewall
+    rn_die 'Не удалось применить NODE_PORT; compose и firewall восстановлены'; return 1
+  fi
+  local attempt
+  for ((attempt=0;attempt<30;attempt++)); do
+    if [[ -n "$(ss -H -ltn "sport = :$NODE_PORT")" ]]; then
+      RN_RUNNING_NODE_PORT="$NODE_PORT"
+      rn_info "Управление нодой переведено на TCP/$NODE_PORT. Такой же порт должен быть указан в панели."
+      return 0
+    fi
+    sleep 1
+  done
+  cp -a "$RN_BACKUP/node-compose-before.yml" "$file"
+  (cd "$directory"; docker compose up -d --no-deps --pull never "$service") || true
+  rn_restore_firewall
+  rn_die 'Новый NODE_PORT не слушает; предыдущие compose и firewall восстановлены'
 }

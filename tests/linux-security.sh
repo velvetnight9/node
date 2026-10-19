@@ -9,7 +9,19 @@ mkdir -p /run/sshd
 chmod 755 /run/sshd
 chown root:root /run/sshd
 ssh-keygen -A
-/usr/sbin/sshd -p 24022 -o PidFile=/run/qa-sshd.pid
+systemctl stop ssh.service || true
+cat >/etc/ssh/sshd_config <<'EOF'
+Port 24022
+ListenAddress 0.0.0.0
+ListenAddress ::
+PermitRootLogin yes
+PasswordAuthentication yes
+UsePAM yes
+EOF
+systemctl start ssh.service
+install -d -m 700 /root/qa-ssh-test
+[[ -e /root/qa-ssh-test/key ]] || ssh-keygen -q -t ed25519 -N '' -f /root/qa-ssh-test/key
+export SSH_PUBLIC_KEY="$(cat /root/qa-ssh-test/key.pub)" SSH_PORT=24022
 ip netns add qa-peer
 ip link add qa-node type veth peer name qa-client
 ip link set qa-client netns qa-peer
@@ -62,7 +74,6 @@ ufw allow 3001/tcp
 ufw allow 18080/tcp
 printf '[DEFAULT]\nbantime = 2h\n' >/etc/fail2ban/jail.local
 original_jail=$(sha256sum /etc/fail2ban/jail.local)
-original_ssh=$(sha256sum /etc/ssh/sshd_config)
 rn_security
 probe 10.77.0.2 10.77.0.1 9744 || fail panel_ipv4
 ! probe 10.77.0.3 10.77.0.1 9744 || fail outsider_ipv4
@@ -70,7 +81,7 @@ probe fd77::2 fd77::1 9744 || fail panel_ipv6
 ! probe fd77::3 fd77::1 9744 || fail outsider_ipv6
 probe 10.77.0.3 10.77.0.1 24022 || fail ssh_retained
 [[ "$original_jail" == "$(sha256sum /etc/fail2ban/jail.local)" ]] || fail jail_local_changed
-[[ "$original_ssh" == "$(sha256sum /etc/ssh/sshd_config)" ]] || fail ssh_changed_without_keyproof
+sshd -T | grep 'passwordauthentication no' >/dev/null || fail password_not_disabled
 pass panel_only_both_families_and_ssh_retained
 cat >/tmp/qa-public-xray.py <<'PY'
 import ctypes,socket,threading,time

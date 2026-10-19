@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 [[ "${DISPOSABLE_INSTALLER_QA:-}" == 1 ]] || exit 1
 export DEBIAN_FRONTEND=noninteractive
+export SSH_PORT=24022
+export SSH_PUBLIC_KEY="$(cat /root/qa-ssh-test/key.pub)"
+systemctl start ssh.service
 apt-get update
 apt-get install -y nginx openssl
 source /source/src/security.sh

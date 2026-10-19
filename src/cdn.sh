@@ -8,9 +8,11 @@ rn_cdn_options() {
       --repair|--check|--security-only) MODE="${1#--}"; shift;;
       --panel-ip) PANEL_IPS="${2:?Нужен IP}"; shift 2;;
       --node-port) NODE_PORT="${2:?Нужен порт}"; shift 2;;
+      --ssh-port) SSH_PORT="${2:?Нужен порт}"; shift 2;;
+      --ssh-key) SSH_PUBLIC_KEY="${2:?Нужен публичный ключ}"; shift 2;;
       --origin) ORIGIN_DOMAIN="${2:?Нужен домен}"; shift 2;;
       --xhttp-port) XHTTP_PORT="${2:?Нужен порт}"; shift 2;;
-      --help) printf 'Запуск: bash install-%s-cdn.sh [--repair|--check|--security-only] [--panel-ip IP]\nДанные запрашиваются в терминале. Существующие SSH и ключ ноды сохраняются.\n' "$CDN_PROVIDER"; exit 0;;
+      --help) printf 'Запуск: bash install-%s-cdn.sh [--repair|--check|--security-only] [--panel-ip IP] [--ssh-port 48522] [--node-port 9744]\nSSH доступен с любого IP только по ключу; управление только с IP панели.\nСвой публичный SSH-ключ: SSH_PUBLIC_KEY или --ssh-key. SECRET_KEY ноды сохраняется.\n' "$CDN_PROVIDER"; exit 0;;
       *) rn_die "Неизвестный аргумент $1"; exit 1;;
     esac
   done
@@ -128,6 +130,7 @@ rn_cdn_wait_core() {
 }
 rn_cdn_checks() {
   rn_node_info
+  [[ -n "${NODE_PORT:-}" ]] || NODE_PORT="${RN_RUNNING_NODE_PORT:-}"
   rn_cdn_detect
   printf 'CDN: %s\nNODE_PORT: %s\nOrigin: %s\nXHTTP: %s\nnginx: %s (%s)\n' "$CDN_PROVIDER" "${NODE_PORT:-не найден}" "${ORIGIN_DOMAIN:-не найден}" "${XHTTP_PORT:-не найден}" "${NGINX_CONFIG:-не найден}" "$ORIGIN_MODE"
   rn_nginx_test
@@ -161,7 +164,8 @@ PY
 rn_cdn_start_node() {
   if command -v docker >/dev/null && docker inspect "$NODE_CONTAINER" >/dev/null 2>&1; then
     if [[ "$(docker inspect -f '{{.State.Running}}' "$NODE_CONTAINER")" != true ]]; then docker start "$NODE_CONTAINER"; fi
-    rn_info 'Существующая нода сохранена: её образ, compose и ключ не менялись'
+    rn_change_node_port
+    rn_info 'Образ и ключ существующей ноды сохранены; NODE_PORT сверён с выбранным значением'
     return
   fi
   if ! command -v docker >/dev/null; then
@@ -298,7 +302,12 @@ rn_cdn_main() {
     fi
   fi
   # Сначала собираем все данные, затем запускаем установку без новых вопросов.
+  rn_info 'Защита CDN: SSH только по ключу, Fail2ban только для SSH, управление только с IP панели.'
+  rn_info 'Общие IP-списки traffic-guard не применяются: блокировка CDN edge может отключить пользователей.'
   rn_prepare
+  if [[ "$MODE" == security-only && -n "${RN_RUNNING_NODE_PORT:-}" && "$NODE_PORT" != "$RN_RUNNING_NODE_PORT" ]]; then
+    rn_die '--security-only не меняет порт контейнера. Для смены NODE_PORT используйте --repair и выставьте тот же порт в панели.'; return 1
+  fi
   if [[ "$MODE" != security-only ]]; then
     rn_ask XHTTP_PORT 'Локальный XHTTP-порт из профиля панели' 4443
     if [[ "$CDN_PROVIDER" == timeweb ]]; then
@@ -340,7 +349,7 @@ rn_cdn_main() {
   fi
   rn_cdn_tune_native_nginx
   rn_cdn_checks
-  printf '\nГотово. Сохранены SSH и существующие ключи. Порт управления — только для панели.\n'
+  printf '\nГотово. SSH TCP/%s — только ключ. Управление TCP/%s — только для IP панели.\n' "$SSH_PORT" "$NODE_PORT"
   printf 'CDN-ресурс и Host/SNI настройте по HTML-гайду; обновите подписку и проверьте оба направления.\n'
-  printf 'Антисканер и шейпинг по IP CDN не включались.\n'
+  printf 'Общие IP-списки и шейпинг CDN edge не применяются.\n'
 }

@@ -18,9 +18,10 @@ RN_ROLE=standard
 RN_MODE="${1:-auto}"
 case "$RN_MODE" in
   --help)
-    printf 'Запуск: bash install.sh [--repair|--check|--resume]\\nПри существующей ноде по умолчанию выполняется безопасная донастройка.\\nPANEL_IPS="IPv4 IPv6" — адреса панели. SSH и рабочий compose сохраняются.\\n'; exit 0;;
+    printf 'Запуск: bash install.sh [--repair|--check|--resume]\\nPANEL_IPS="IPv4 IPv6" — адреса панели. SSH_PORT=48522 — вход с любого IP только по ключу.\\nNODE_PORT=9744 — управление только с IP панели; такой же порт укажите в панели.\\n'; exit 0;;
   --check)
     rn_node_info
+    [[ -n "${NODE_PORT:-}" ]] || NODE_PORT="${RN_RUNNING_NODE_PORT:-}"
     printf 'SSH: %s\\nNODE_PORT: %s\\n' "$(rn_ssh_ports)" "${NODE_PORT:-не определён}"
     ufw status numbered; nft list table inet remnanode_control; fail2ban-client status sshd; exit;;
   auto|--repair|--resume) ;;
@@ -40,14 +41,9 @@ if [[ "$RN_MODE" != --resume ]] && {
     printf 'Проверьте также inbound и доступность TCP/UDP из подписки.\\n'
     exit 0
 fi
-if [[ -z "${SSH_PORT:-}" ]]; then
-    SSH_PORT="${SSH_CONNECTION:-}"
-    SSH_PORT="${SSH_PORT##* }"
-    [[ -n "$SSH_PORT" ]] || SSH_PORT="$(rn_ssh_ports | cut -d, -f1)"
-fi
 '''
 source=source.replace('set -Eeuo pipefail\n','set -Eeuo pipefail\n'+prefix+'\n',1)
-source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-19.3"')
+source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-19.4"')
 source=re.sub(r'^STANDARD_SSH_PUBLIC_KEY=.*$', 'STANDARD_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"',source,count=1,flags=re.M)
 start=source.index('ensure_ufw_rules() {')
 end=source.index('\n}\n',start)+3
@@ -86,11 +82,8 @@ replace_stage(5,'''if ((START_STEP <= 5)); then
   fi
   RN_SSH_PORTS="$(rn_ssh_ports)"
   [[ -n "$RN_SSH_PORTS" ]] || { err 'Не найден SSH-порт'; exit 1; }
-  SSH_PORT="${SSH_CONNECTION:-}"
-  SSH_PORT="${SSH_PORT##* }"
-  [[ -n "$SSH_PORT" ]] || SSH_PORT="${RN_SSH_PORTS%%,*}"
   sshd -t
-  ok "SSH-порты $RN_SSH_PORTS сохранены; пароль не отключается до проверки ключевого входа"
+  ok "SSH-порт $SSH_PORT выбран; key-only политика применяется следующим этапом"
   save_state 5
 fi''')
 replace_stage(6,'''if ((START_STEP <= 6)); then
