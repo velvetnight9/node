@@ -331,6 +331,7 @@ rn_cdn_main() {
     if [[ -n "${ORIGIN_DOMAIN:-}" ]]; then rn_domain "$ORIGIN_DOMAIN"; fi
   fi
   rn_security
+  rn_network
   if [[ "$MODE" == security-only ]]; then return; fi
   if [[ "$MODE" == repair && -z "${NGINX_CONFIG:-}" ]]; then rn_die 'nginx origin не найден; ничего не переустанавливаю'; return 1; fi
   rn_cdn_start_node

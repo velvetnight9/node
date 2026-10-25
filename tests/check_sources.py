@@ -18,6 +18,12 @@ for name in ('install.sh','install-yandex-cdn.sh','install-timeweb-cdn.sh'):
     assert 'cat >/etc/fail2ban/jail.local' not in text
     assert 'banaction = nftables-multiport' in text
     assert 'ct status dnat ct original proto-dst' in text
+    assert '  rn_security\n  rn_network\n' in text,(name,'IPv6/BBR не вызывается после защиты')
+    assert 'rn_network_access || return 1\n  RN_OLD_SSH_PORTS=' in text
+    if name=='install.sh':
+        assert '  rn_security\n  rn_network\n  save_state 6' in text
+    else:
+        assert '  rn_security\n  rn_network\n  if [[ "$MODE" == security-only ]]' in text
     if name!='install.sh':
         for bad in ('ssh-ed25519 AAAA','traffic-guard full','tc qdisc del'):
             assert bad not in text,(name,bad)

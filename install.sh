@@ -124,6 +124,7 @@ rn_prepare() {
   rn_ask NODE_PORT "Порт управления нодой из панели (сейчас ${RN_RUNNING_NODE_PORT:-не найден})" 9744
   rn_port "$NODE_PORT" || { rn_die 'Некорректный NODE_PORT'; return 1; }
   rn_ssh_context
+  rn_network_access || return 1
   RN_OLD_SSH_PORTS="$(rn_ssh_ports)"
   rn_ask SSH_PORT "SSH-порт для входа на сервер (сейчас ${RN_OLD_SSH_PORTS:-не найден})" 48522
   rn_port "$SSH_PORT" || { rn_die 'Некорректный SSH_PORT'; return 1; }
@@ -134,6 +135,72 @@ rn_prepare() {
   RN_BACKUP="$(mktemp -d /root/remnanode-security-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX)"
   chmod 700 "$RN_BACKUP"
   rn_info "SSH: TCP/$SSH_PORT; управление: TCP/$NODE_PORT только с $PANEL_IPS"
+}
+rn_network_access() {
+  # Отключение IPv6 требует IPv4 для SSH и связи панели с нодой.
+  local panel ipv4=0
+  for panel in $PANEL_IPS; do [[ "$panel" == *:* ]] || ipv4=1; done
+  ((ipv4)) || { rn_die 'Для отключения IPv6 укажите IPv4 панели в PANEL_IPS'; return 1; }
+  rn_ssh_context
+  if [[ "${SSH_CONNECTION:-}" == *:* ]]; then
+    rn_die 'Текущий SSH использует IPv6. Подключитесь к IPv4 сервера и повторите запуск.'; return 1
+  fi
+}
+rn_network() {
+  rn_network_access || return 1
+  rn_ensure_packages procps kmod
+  # Встроенный BBR работает и без отдельного загружаемого модуля.
+  modprobe tcp_bbr 2>/dev/null || true
+  modprobe sch_fq 2>/dev/null || true
+  local available conf modules tmp before key path value
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control)" || return 1
+  if [[ " $available " != *' bbr '* ]]; then
+    rn_die 'Ядро не поддерживает TCP BBR. Нужны ядро/модули с CONFIG_TCP_CONG_BBR; сетевые настройки не изменены.'; return 1
+  fi
+  conf=/etc/sysctl.d/99-remnanode-network.conf
+  modules=/etc/modules-load.d/remnanode-network.conf
+  tmp="$RN_BACKUP/network-new.conf"
+  before="$RN_BACKUP/network-runtime-before.conf"
+  # all не отражает реальное состояние отдельных интерфейсов.
+  : >"$before"
+  for key in net.core.default_qdisc net.ipv4.tcp_congestion_control; do
+    value="$(sysctl -n "$key")" || return 1
+    printf '%s = %s\n' "$key" "$value" >>"$before"
+  done
+  for path in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+    [[ -f "$path" ]] || continue
+    key="net/ipv6/conf/$(basename "$(dirname "$path")")/disable_ipv6"
+    printf '%s = %s\n' "$key" "$(cat "$path")" >>"$before"
+  done
+  cat >"$tmp" <<'EOF'
+# Managed by remnanode installer. Applied now and on boot.
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+# Missing keys are allowed when IPv6 is disabled in the kernel already.
+-net.ipv6.conf.all.disable_ipv6 = 1
+-net.ipv6.conf.default.disable_ipv6 = 1
+-net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+  if ! sysctl -p "$tmp" || ! rn_network_verify; then
+    sysctl -p "$before" || true
+    rn_die 'Не удалось применить IPv6/BBR; выполнен возврат сохранённых sysctl, постоянные файлы не изменены.'; return 1
+  fi
+  install -d -m 755 /etc/sysctl.d /etc/modules-load.d
+  [[ ! -e "$conf" ]] || cp -a "$conf" "$RN_BACKUP/network-sysctl-before.conf"
+  [[ ! -e "$modules" ]] || cp -a "$modules" "$RN_BACKUP/network-modules-before.conf"
+  install -m 644 "$tmp" "$conf"
+  printf 'tcp_bbr\nsch_fq\n' >"$RN_BACKUP/network-modules-new.conf"
+  install -m 644 "$RN_BACKUP/network-modules-new.conf" "$modules"
+  rn_info 'IPv6 отключён; TCP BBR включён, default_qdisc=fq. Настройки сохранены для перезагрузки.'
+}
+rn_network_verify() {
+  [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]] || return 1
+  [[ "$(sysctl -n net.core.default_qdisc)" == fq ]] || return 1
+  local path
+  for path in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+    [[ -f "$path" ]] || continue
+    [[ "$(cat "$path")" == 1 ]] || return 1
+  done
 }
 rn_backup() {
   local item
@@ -562,6 +629,7 @@ rn_security() {
 }
 rn_existing_repair() {
   rn_security
+  rn_network
   if command -v docker >/dev/null && docker inspect "$NODE_CONTAINER" >/dev/null 2>&1; then
     local mode
     mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$NODE_CONTAINER")"
@@ -755,7 +823,7 @@ SHAPER_CTRL_SHA256="013980ef503e27d51bdeeec646429734fa4f2798b038d07b34934d50d630
 
 STEP=0
 TOTAL=10
-INSTALLER_VERSION="2026-10-19.4"
+INSTALLER_VERSION="2026-10-25.1"
 STEP_STARTED=0
 LOG_FILE=""
 APT_CONFIG_TMP=""
@@ -3018,6 +3086,7 @@ fi
 if ((START_STEP <= 6)); then
   step "Файрвол: порт управления только для панели"
   rn_security
+  rn_network
   save_state 6
 fi
 
