@@ -448,9 +448,11 @@ port = $RN_SSH_PORTS
 protocol = tcp
 backend = systemd
 filter = sshd[mode=normal]
-maxretry = 5
+maxretry = 6
 findtime = 10m
-bantime = 1h
+bantime = 24h
+bantime.increment = false
+bantime.rndtime = 0
 banaction = nftables-multiport
 action = %(action_)s
 ignoreip = $ignore
@@ -471,6 +473,7 @@ EOF
       local trusted
       for trusted in $PANEL_IPS ${RN_ADMIN_IP:-}; do fail2ban-client set sshd unbanip "$trusted" >/dev/null; done
       fail2ban-client get sshd maxretry
+      fail2ban-client get sshd bantime
       fail2ban-client status sshd
       return 0
     fi
@@ -823,7 +826,7 @@ SHAPER_CTRL_SHA256="013980ef503e27d51bdeeec646429734fa4f2798b038d07b34934d50d630
 
 STEP=0
 TOTAL=10
-INSTALLER_VERSION="2026-10-25.1"
+INSTALLER_VERSION="2026-10-31.1"
 STEP_STARTED=0
 LOG_FILE=""
 APT_CONFIG_TMP=""
@@ -3185,6 +3188,7 @@ if ((START_STEP <= 9)); then
   run_with_progress "Установка Psiphon" bash "$PSIPHON_INSTALLER_TMP" \
     --region "$PSIPHON_REGION" \
     --device-region "$PSIPHON_REGION" \
+    --deny-regions "RU BY IR SY CU KP CN VE" \
     --socks-port "$PSIPHON_SOCKS_PORT" \
     --no-http \
     --bind "$PSIPHON_SOCKS_HOST" \

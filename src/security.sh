@@ -432,9 +432,11 @@ port = $RN_SSH_PORTS
 protocol = tcp
 backend = systemd
 filter = sshd[mode=normal]
-maxretry = 5
+maxretry = 6
 findtime = 10m
-bantime = 1h
+bantime = 24h
+bantime.increment = false
+bantime.rndtime = 0
 banaction = nftables-multiport
 action = %(action_)s
 ignoreip = $ignore
@@ -455,6 +457,7 @@ EOF
       local trusted
       for trusted in $PANEL_IPS ${RN_ADMIN_IP:-}; do fail2ban-client set sshd unbanip "$trusted" >/dev/null; done
       fail2ban-client get sshd maxretry
+      fail2ban-client get sshd bantime
       fail2ban-client status sshd
       return 0
     fi

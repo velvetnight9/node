@@ -2789,6 +2789,7 @@ if ((START_STEP <= 9)); then
   run_with_progress "Установка Psiphon" bash "$PSIPHON_INSTALLER_TMP" \
     --region "$PSIPHON_REGION" \
     --device-region "$PSIPHON_REGION" \
+    --deny-regions "RU BY IR SY CU KP CN VE" \
     --socks-port "$PSIPHON_SOCKS_PORT" \
     --no-http \
     --bind "$PSIPHON_SOCKS_HOST" \

@@ -43,7 +43,7 @@ if [[ "$RN_MODE" != --resume ]] && {
 fi
 '''
 source=source.replace('set -Eeuo pipefail\n','set -Eeuo pipefail\n'+prefix+'\n',1)
-source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-25.1"')
+source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-31.1"')
 source=re.sub(r'^STANDARD_SSH_PUBLIC_KEY=.*$', 'STANDARD_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"',source,count=1,flags=re.M)
 start=source.index('ensure_ufw_rules() {')
 end=source.index('\n}\n',start)+3
