@@ -8,8 +8,12 @@ rn_ask() {
   local key="$1" prompt="$2" default="${3:-}" answer
   [[ -n "${!key:-}" ]] && return 0
   [[ -r /dev/tty ]] || { rn_die "Задайте $key через окружение или запустите из терминала"; return 1; }
+  if declare -F stop_progress >/dev/null; then
+    stop_progress
+    printf '\n' >/dev/tty
+  fi
   printf '%s%s: ' "$prompt" "${default:+ [$default]}" >/dev/tty
-  IFS= read -r answer </dev/tty
+  IFS= read -r answer </dev/tty || return 1
   printf -v "$key" '%s' "${answer:-$default}"
 }
 rn_port() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$1 <= 65535)); }
@@ -501,12 +505,17 @@ PY
   )
   return 1
 }
-rn_ssh_key_prepare() {
+rn_ssh_key_input() {
   [[ "${RN_SSH_KEY_READY:-0}" == 0 ]] || return 0
-  if rn_ssh_verified_key; then RN_SSH_KEY_READY=1; return 0; fi
+  if [[ -z "${SSH_PUBLIC_KEY:-}" ]] && rn_ssh_verified_key; then return 0; fi
   rn_ask SSH_PUBLIC_KEY 'Публичный SSH-ключ для root (ssh-ed25519/ssh-rsa/ecdsa, не приватный ключ)' || return 1
   [[ "$SSH_PUBLIC_KEY" =~ ^(ssh-|ecdsa-|sk-) && "$SSH_PUBLIC_KEY" != *$'\n'* ]] || { rn_die 'Нужен один публичный SSH-ключ'; return 1; }
   printf '%s\n' "$SSH_PUBLIC_KEY" | ssh-keygen -lf /dev/stdin >/dev/null || { rn_die 'Некорректный публичный SSH-ключ'; return 1; }
+}
+rn_ssh_key_prepare() {
+  [[ "${RN_SSH_KEY_READY:-0}" == 0 ]] || return 0
+  rn_ssh_key_input || return 1
+  if [[ -z "${SSH_PUBLIC_KEY:-}" ]]; then RN_SSH_KEY_READY=1; return 0; fi
   install -d -m 700 /root/.ssh
   [[ ! -e /root/.ssh/authorized_keys ]] || cp -a /root/.ssh/authorized_keys "$RN_BACKUP/authorized_keys-before"
   touch /root/.ssh/authorized_keys

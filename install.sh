@@ -21,8 +21,12 @@ rn_ask() {
   local key="$1" prompt="$2" default="${3:-}" answer
   [[ -n "${!key:-}" ]] && return 0
   [[ -r /dev/tty ]] || { rn_die "Задайте $key через окружение или запустите из терминала"; return 1; }
+  if declare -F stop_progress >/dev/null; then
+    stop_progress
+    printf '\n' >/dev/tty
+  fi
   printf '%s%s: ' "$prompt" "${default:+ [$default]}" >/dev/tty
-  IFS= read -r answer </dev/tty
+  IFS= read -r answer </dev/tty || return 1
   printf -v "$key" '%s' "${answer:-$default}"
 }
 rn_port() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$1 <= 65535)); }
@@ -514,12 +518,17 @@ PY
   )
   return 1
 }
-rn_ssh_key_prepare() {
+rn_ssh_key_input() {
   [[ "${RN_SSH_KEY_READY:-0}" == 0 ]] || return 0
-  if rn_ssh_verified_key; then RN_SSH_KEY_READY=1; return 0; fi
+  if [[ -z "${SSH_PUBLIC_KEY:-}" ]] && rn_ssh_verified_key; then return 0; fi
   rn_ask SSH_PUBLIC_KEY 'Публичный SSH-ключ для root (ssh-ed25519/ssh-rsa/ecdsa, не приватный ключ)' || return 1
   [[ "$SSH_PUBLIC_KEY" =~ ^(ssh-|ecdsa-|sk-) && "$SSH_PUBLIC_KEY" != *$'\n'* ]] || { rn_die 'Нужен один публичный SSH-ключ'; return 1; }
   printf '%s\n' "$SSH_PUBLIC_KEY" | ssh-keygen -lf /dev/stdin >/dev/null || { rn_die 'Некорректный публичный SSH-ключ'; return 1; }
+}
+rn_ssh_key_prepare() {
+  [[ "${RN_SSH_KEY_READY:-0}" == 0 ]] || return 0
+  rn_ssh_key_input || return 1
+  if [[ -z "${SSH_PUBLIC_KEY:-}" ]]; then RN_SSH_KEY_READY=1; return 0; fi
   install -d -m 700 /root/.ssh
   [[ ! -e /root/.ssh/authorized_keys ]] || cp -a /root/.ssh/authorized_keys "$RN_BACKUP/authorized_keys-before"
   touch /root/.ssh/authorized_keys
@@ -826,7 +835,7 @@ SHAPER_CTRL_SHA256="013980ef503e27d51bdeeec646429734fa4f2798b038d07b34934d50d630
 
 STEP=0
 TOTAL=10
-INSTALLER_VERSION="2026-10-31.1"
+INSTALLER_VERSION="2026-10-31.2"
 STEP_STARTED=0
 LOG_FILE=""
 APT_CONFIG_TMP=""
@@ -1885,6 +1894,9 @@ printf '%s' "$SECRET_KEY" |
 command -v python3 >/dev/null || apt-get -o DPkg::Lock::Timeout=300 install -y python3
 rn_ask PANEL_IPS 'IP панели (IPv4/IPv6 через пробел)'
 PANEL_IPS="$(rn_ips "$PANEL_IPS")"
+rn_ssh_context
+rn_ssh_key_input
+STANDARD_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"
 
 mkdir -p "$NODE_DIR"
 mkdir -p /var/log/remnanode

@@ -82,6 +82,8 @@ PANEL_IPS="203.0.113.20" SSH_PORT=48522 NODE_PORT=9744 bash install.sh --repair
   AuthenticationMethods — publickey. Если текущий ключевой вход не подтверждён,
   скрипт запрашивает ваш публичный ключ; без него завершает установку с ошибкой.
   Свой ключ можно заранее передать через `SSH_PUBLIC_KEY`. Приватный ключ не нужен.
+  При новой обычной установке ключ проверяется до запуска этапов и индикатора.
+  Любой дополнительный вопрос останавливает индикатор, чтобы запрос и ввод оставались видны.
   Окружение SSH восстанавливается после sudo без печати остальных переменных.
 - Действующие ключ и домены сохраняются. При смене NODE_PORT меняется только
   environment соответствующего сервиса в compose и пересоздаётся только нода,
@@ -139,6 +141,7 @@ Fail2ban блокирует SSH на 24 часа на шестой неудач�
 ```bash
 python3 build.py
 python3 tests/check_sources.py
+python3 tests/check_prompts.py
 # Передайте скачанный закреплённый psiphon_install.sh с проверяемым SHA256:
 python3 tests/check_access_policy.py /path/to/psiphon_install.sh
 python3 tests/check_network.py

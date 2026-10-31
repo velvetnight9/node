@@ -43,7 +43,7 @@ if [[ "$RN_MODE" != --resume ]] && {
 fi
 '''
 source=source.replace('set -Eeuo pipefail\n','set -Eeuo pipefail\n'+prefix+'\n',1)
-source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-31.1"')
+source=source.replace('INSTALLER_VERSION="2026-10-19.2"','INSTALLER_VERSION="2026-10-31.2"')
 source=re.sub(r'^STANDARD_SSH_PUBLIC_KEY=.*$', 'STANDARD_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"',source,count=1,flags=re.M)
 start=source.index('ensure_ufw_rules() {')
 end=source.index('\n}\n',start)+3
@@ -56,6 +56,9 @@ assert source.count(anchor)==1
 source=source.replace(anchor,anchor+'''\ncommand -v python3 >/dev/null || apt-get -o DPkg::Lock::Timeout=300 install -y python3
 rn_ask PANEL_IPS 'IP панели (IPv4/IPv6 через пробел)'
 PANEL_IPS="$(rn_ips "$PANEL_IPS")"
+rn_ssh_context
+rn_ssh_key_input
+STANDARD_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"
 ''',1)
 source=source.replace('    restart: always\n\n    cap_add:', '''    restart: always
     logging:
